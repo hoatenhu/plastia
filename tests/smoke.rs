@@ -114,6 +114,12 @@ fn dry_run_preserves_work_and_scope_isolation() {
     run(&["ingest", events_path]);
     assert!(run(&["consolidate", "--dry-run"]).contains("\"memories_created\": 2"));
     assert!(run(&["stats"]).contains("\"memories\": 0"));
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    let outbox: i64 = conn
+        .query_row("SELECT COUNT(*) FROM outbox", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(outbox, 0);
+    drop(conn);
     run(&["consolidate"]);
     assert!(run(&["search", "review", "--scope", "project/a"]).contains("review"));
     assert!(!run(&["search", "review", "--scope", "project/b"]).contains("review"));
@@ -159,4 +165,54 @@ fn opens_existing_store_with_outbox_schema() {
         .query_row("SELECT COUNT(*) FROM outbox", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 0);
+}
+
+#[test]
+fn consolidate_persists_pending_intent_before_materialization() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("store");
+    let bin = env!("CARGO_BIN_EXE_plastia");
+    let run = |args: &[&str]| {
+        let out = Command::new(bin)
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    run(&["init"]);
+
+    let event_file = tmp.path().join("event.json");
+    fs::write(
+        &event_file,
+        r#"{"id":"decision-1","scope":"project/a","text":"Decision: gate = review"}"#,
+    )
+    .unwrap();
+    run(&["ingest", event_file.to_str().unwrap()]);
+    run(&["consolidate"]);
+
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    let applied: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM outbox WHERE status='applied'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let memories: i64 = conn
+        .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+        .unwrap();
+    let processed: i64 = conn
+        .query_row("SELECT COUNT(*) FROM events WHERE processed=1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!((applied, memories, processed), (1, 1, 1));
+    assert_eq!(fs::read_dir(home.join("memories")).unwrap().count(), 1);
 }

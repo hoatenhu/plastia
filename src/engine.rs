@@ -202,15 +202,31 @@ pub fn consolidate(conn: &mut Connection, home: &Path, dry_run: bool) -> Result<
                         ));
                         let path = home.join("memories").join(format!("{id}.md"));
                         let md = encode_markdown(&id, &scope, &c, &event_id, &timestamp);
+                        let intent_id = outbox_id(&event_id, &scope, &c);
+                        conn.execute(
+                            "INSERT OR IGNORE INTO outbox(id,event_id,scope,kind,memory_key,memory_id,text,markdown,file_path,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                            params![intent_id, event_id, scope, c.kind, c.key, id, c.text, md, path.to_string_lossy().to_string(), timestamp],
+                        )?;
                         atomic_write(&path, &md)?;
                         conn.execute("INSERT OR IGNORE INTO memories(id,scope,kind,memory_key,text,source_event,file_path,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
                             params![id, scope, c.kind, c.key, c.text, event_id, path.to_string_lossy().to_string(), timestamp])?;
+                        conn.execute(
+                            "UPDATE outbox SET status='applied' WHERE id=?1",
+                            [&intent_id],
+                        )?;
                     }
                 }
             }
         }
         if !dry_run {
-            conn.execute("UPDATE events SET processed=1 WHERE id=?1", [&event_id])?;
+            let pending: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM outbox WHERE event_id=?1 AND status='pending'",
+                [&event_id],
+                |row| row.get(0),
+            )?;
+            if pending == 0 {
+                conn.execute("UPDATE events SET processed=1 WHERE id=?1", [&event_id])?;
+            }
         }
     }
     Ok(s)
