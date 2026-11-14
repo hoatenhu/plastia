@@ -3,7 +3,7 @@
 ## Boundaries
 `agent hooks/adapters -> capture API -> append-only episode store -> candidate extraction -> consolidation planner -> transactional materializer -> search/recall API -> agent adapters`.
 
-Core state and event log live in SQLite. Markdown holds durable human-readable knowledge; SQL holds materialization state and rebuildable FTS5 indexes. Avoid bidirectional ownership ambiguity. Consolidation persists a SQLite outbox intent, applies Markdown through temp-file rename, materializes the SQL row idempotently, and replays pending intents before mutating CLI commands. A writer service or disciplined filesystem lock must still serialize cross-resource writes. Directory `fsync` and full power-loss guarantees are not claimed until tested.
+Core state and event log live in SQLite. Markdown holds durable human-readable knowledge; SQL holds materialization state and rebuildable FTS5 indexes. Avoid bidirectional ownership ambiguity. Consolidation persists a SQLite outbox intent, applies Markdown through temp-file rename, materializes the SQL row idempotently, and replays pending intents before mutating CLI commands. Mutating CLI commands serialize through `<home>/write.lock`; read-only commands remain lock-free. Directory `fsync` and full power-loss guarantees are not claimed until tested.
 
 ## Minimum event envelope (target schema; v0.1 supports fewer fields)
 ```json
@@ -44,7 +44,7 @@ Core Rust API first. CLI for ingest, search, inspect, dry-run/replay, consolidat
 Version migrations; never rewrite user Markdown without backup or idempotent recovery. Provenance should survive export/import. No silent loss of history during reindex. Keep documented limitations in README until resolved.
 
 ## Known v0.1 technical debt
-- `consolidate` has a persisted outbox and replay path, but no concurrency lock or kill-process fault-injection coverage yet.
+- `consolidate` has a persisted outbox and replay path; CLI writers use a PID-bearing lock, but kill-process fault-injection and directory-sync coverage remain.
 - `reindex` clears/rebuilds SQL memories but does not preserve durable validity state/versioning, and events are not encoded into Markdown.
 - `source` is unauthenticated text. Existing extracted policies are *unverified claims*, not authorized directives.
 - Bare-key extraction and FTS OR-token semantics are limited; no domain-aware NLP, bilingual recall tests, or stable ranking across episode/knowledge sources.

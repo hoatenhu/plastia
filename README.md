@@ -81,7 +81,7 @@ This is a deliberate safety-first design, **not** natural language memory extrac
     <id>.md             # durable memory; JSON metadata in HTML comment
 ```
 
-Use `plastia reindex` to rebuild the *durable memory* SQL index from Markdown (events remain in SQLite). Do not edit `memory.sqlite3` manually. Consolidation records Markdown memory writes in a SQLite outbox and replays pending intents before mutating commands. If a target file already exists with different content, recovery fails without overwriting it. Multi-process writers still need a single writer service plus file locking. Directory `fsync` power-loss guarantees are not yet claimed.
+Use `plastia reindex` to rebuild the *durable memory* SQL index from Markdown (events remain in SQLite). Do not edit `memory.sqlite3` manually. Consolidation records Markdown memory writes in a SQLite outbox and replays pending intents before mutating commands. Mutating commands acquire `.plastia/write.lock`; live writers are rejected and stale locks with dead PIDs can be reclaimed. If a target file already exists with different content, recovery fails without overwriting it. Directory `fsync` power-loss guarantees are not yet claimed.
 
 ## Roadmap
 
@@ -90,7 +90,8 @@ Use `plastia reindex` to rebuild the *durable memory* SQL index from Markdown (e
 - [x] Markdown durable memories, full-text search, reindex
 - [x] Conflict detection and provenance
 - [x] Idempotent consolidation outbox and replay recovery
-- [ ] Multi-writer file locking and stronger crash durability
+- [x] Single-writer lock for mutating commands
+- [ ] Stronger crash durability and directory `fsync`
 - [ ] Conflict resolution, confidence/authority policies, version history
 - [ ] Hook adapters: Hermes, Claude Code, Codex, OpenCode
 - [ ] MCP server (stdio first)

@@ -1,5 +1,103 @@
 use rusqlite::{Connection, Result};
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Deserialize, Serialize)]
+struct LockMetadata {
+    pid: u32,
+    started_at: u64,
+}
+
+pub struct WriterLock {
+    path: PathBuf,
+    _file: File,
+}
+
+impl WriterLock {
+    pub fn acquire(home: &Path) -> crate::Result<Self> {
+        fs::create_dir_all(home.join("memories"))
+            .map_err(|_| "could not create memory directory")?;
+        let path = home.join("write.lock");
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                let metadata = LockMetadata {
+                    pid: std::process::id(),
+                    started_at: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                };
+                serde_json::to_writer(&mut file, &metadata)
+                    .map_err(|_| "could not write writer lock metadata")?;
+                file.flush()
+                    .map_err(|_| "could not flush writer lock metadata")?;
+                Ok(Self { path, _file: file })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let data =
+                    fs::read_to_string(&path).map_err(|_| "could not read writer lock metadata")?;
+                let metadata: LockMetadata = serde_json::from_str(&data)
+                    .map_err(|_| format!("invalid writer lock: {}", path.display()))?;
+                if process_exists(metadata.pid) {
+                    return Err(format!(
+                        "store is busy: writer PID {} holds {}",
+                        metadata.pid,
+                        path.display()
+                    )
+                    .into());
+                }
+                fs::remove_file(&path).map_err(|_| "could not remove stale writer lock")?;
+                let file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?;
+                let mut lock = Self { path, _file: file };
+                let metadata = LockMetadata {
+                    pid: std::process::id(),
+                    started_at: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                };
+                serde_json::to_writer(&mut lock._file, &metadata)
+                    .map_err(|_| "could not write writer lock metadata")?;
+                lock._file
+                    .flush()
+                    .map_err(|_| "could not flush writer lock metadata")?;
+                Ok(lock)
+            }
+            Err(error) => Err(Box::new(error)),
+        }
+    }
+}
+
+impl Drop for WriterLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn process_exists(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(true)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
 
 pub fn open(home: &Path) -> Result<Connection> {
     std::fs::create_dir_all(home.join("memories"))

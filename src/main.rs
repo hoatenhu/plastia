@@ -58,6 +58,14 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    let _writer_lock = if matches!(
+        &cli.command,
+        Command::Init | Command::Ingest { .. } | Command::Consolidate { .. } | Command::Reindex
+    ) {
+        Some(storage::WriterLock::acquire(&cli.home)?)
+    } else {
+        None
+    };
     if matches!(&cli.command, Command::Init) {
         let conn = storage::open(&cli.home)?;
         drop(conn);

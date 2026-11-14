@@ -344,3 +344,89 @@ fn recovery_rejects_conflicting_existing_memory_file() {
         .unwrap();
     assert_eq!((status, processed), ("pending".into(), 0));
 }
+
+#[test]
+fn writer_lock_rejects_live_owner_and_reclaims_dead_owner() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("store");
+    let bin = env!("CARGO_BIN_EXE_plastia");
+    let run = |args: &[&str]| {
+        Command::new(bin)
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let init = run(&["init"]);
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    assert!(!home.join("write.lock").exists());
+
+    let current_pid = std::process::id();
+    fs::write(
+        home.join("write.lock"),
+        format!(r#"{{"pid":{current_pid},"started_at":0}}"#),
+    )
+    .unwrap();
+    let blocked = run(&["ingest", "examples/conversation.json"]);
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("store is busy"));
+    assert!(home.join("write.lock").exists());
+
+    fs::write(
+        home.join("write.lock"),
+        r#"{"pid":4294967295,"started_at":0}"#,
+    )
+    .unwrap();
+    let recovered = run(&["consolidate"]);
+    assert!(
+        recovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert!(!home.join("write.lock").exists());
+}
+
+#[test]
+fn writer_lock_rejects_invalid_metadata_and_read_only_commands_ignore_lock() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("store");
+    let bin = env!("CARGO_BIN_EXE_plastia");
+    let run = |args: &[&str]| {
+        Command::new(bin)
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let init = run(&["init"]);
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    fs::write(home.join("write.lock"), "not-json").unwrap();
+
+    let blocked = run(&["ingest", "examples/conversation.json"]);
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("invalid writer lock"));
+    assert!(home.join("write.lock").exists());
+
+    let stats = run(&["stats"]);
+    assert!(
+        stats.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stats.stderr)
+    );
+    let search = run(&["search", "production"]);
+    assert!(
+        search.status.success(),
+        "{}",
+        String::from_utf8_lossy(&search.stderr)
+    );
+}
