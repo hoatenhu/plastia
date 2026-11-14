@@ -1,0 +1,7 @@
+{
+  "events": [
+    {"id":"meeting-001","scope":"project/swich","source":"conversation/pm","occurred_at":"2026-11-14T09:00:00Z","text":"We discussed release safety.\nPolicy: production-approval = CEO approval is required before production deploy.\nDecision: merge-owner = Architect merges to main."},
+    {"id":"meeting-002","scope":"project/swich","source":"conversation/qa","occurred_at":"2026-11-14T12:00:00Z","text":"QA observed a deployment failure.\nLesson: release-testing = Always keep real black-box test evidence."},
+    {"id":"meeting-003","scope":"project/swich","source":"conversation/pm","occurred_at":"2026-11-14T14:00:00Z","text":"Policy: production-approval = QA approval alone is sufficient."}
+  ]
+}
