@@ -68,6 +68,9 @@ fn run() -> Result<()> {
         return Err("store not initialized; run `plastia init`".into());
     }
     let mut conn = storage::open(&cli.home)?;
+    if !matches!(&cli.command, Command::Search { .. } | Command::Stats) {
+        engine::recover(&mut conn, &cli.home)?;
+    }
     match cli.command {
         Command::Init => unreachable!(),
         Command::Ingest { file } => {

@@ -216,3 +216,72 @@ fn consolidate_persists_pending_intent_before_materialization() {
     assert_eq!((applied, memories, processed), (1, 1, 1));
     assert_eq!(fs::read_dir(home.join("memories")).unwrap().count(), 1);
 }
+
+#[test]
+fn recovery_replays_pending_intent_idempotently() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("store");
+    let bin = env!("CARGO_BIN_EXE_plastia");
+    let run = |args: &[&str]| {
+        let out = Command::new(bin)
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    run(&["init"]);
+
+    let event_file = tmp.path().join("event.json");
+    fs::write(
+        &event_file,
+        r#"{"id":"decision-1","scope":"project/a","text":"Decision: gate = review"}"#,
+    )
+    .unwrap();
+    run(&["ingest", event_file.to_str().unwrap()]);
+
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    let memory_id = "memory-recovery";
+    let file_path = home.join("memories").join(format!("{memory_id}.md"));
+    let markdown = "<!-- plastia:{} -->\n\n# decision\n\nreview\n";
+    conn.execute(
+        "INSERT INTO outbox(id,event_id,scope,kind,memory_key,memory_id,text,markdown,file_path,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        rusqlite::params!["intent-recovery", "decision-1", "project/a", "decision", "gate", memory_id, "review", markdown, file_path.to_string_lossy().to_string(), "now"],
+    )
+    .unwrap();
+    drop(conn);
+
+    run(&["consolidate"]);
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    let applied: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM outbox WHERE status='applied'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(applied, 1);
+    assert_eq!(fs::read_to_string(&file_path).unwrap(), markdown);
+    let memories: i64 = conn
+        .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(memories, 1);
+    drop(conn);
+
+    run(&["consolidate"]);
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    let (outbox, memories): (i64, i64) = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM outbox WHERE status='applied'), (SELECT COUNT(*) FROM memories)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((outbox, memories), (1, 1));
+}

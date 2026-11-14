@@ -149,6 +149,69 @@ fn atomic_write(path: &Path, data: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn recover(conn: &mut Connection, home: &Path) -> Result<usize> {
+    let mut intents = Vec::new();
+    {
+        let mut query = conn.prepare(
+            "SELECT id,event_id,scope,kind,memory_key,memory_id,text,markdown,file_path,created_at FROM outbox WHERE status='pending' ORDER BY rowid",
+        )?;
+        let rows = query.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+            ))
+        })?;
+        for row in rows {
+            intents.push(row?);
+        }
+    }
+
+    let mut applied = 0;
+    for (intent_id, event_id, scope, kind, key, memory_id, text, markdown, file_path, created_at) in
+        intents
+    {
+        let path = Path::new(&file_path);
+        if path.exists() {
+            let existing = fs::read_to_string(path)?;
+            if existing != markdown {
+                return Err(format!("outbox target differs: {}", path.display()).into());
+            }
+        } else {
+            if path.parent() != Some(home.join("memories").as_path()) {
+                return Err(
+                    format!("outbox target outside memory directory: {}", path.display()).into(),
+                );
+            }
+            atomic_write(path, &markdown)?;
+        }
+
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO memories(id,scope,kind,memory_key,text,source_event,file_path,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![memory_id, scope, kind, key, text, event_id, file_path, created_at],
+        )?;
+        tx.execute(
+            "UPDATE outbox SET status='applied' WHERE id=?1",
+            [&intent_id],
+        )?;
+        tx.execute(
+            "UPDATE events SET processed=1 WHERE id=?1 AND NOT EXISTS (SELECT 1 FROM outbox WHERE event_id=?1 AND status='pending')",
+            [&event_id],
+        )?;
+        tx.commit()?;
+        applied += 1;
+    }
+    Ok(applied)
+}
+
 pub fn consolidate(conn: &mut Connection, home: &Path, dry_run: bool) -> Result<Summary> {
     let mut events = Vec::new();
     {
