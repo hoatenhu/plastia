@@ -430,3 +430,82 @@ fn writer_lock_rejects_invalid_metadata_and_read_only_commands_ignore_lock() {
         String::from_utf8_lossy(&search.stderr)
     );
 }
+
+#[test]
+fn process_exit_after_outbox_commit_recovers() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("store");
+    let bin = env!("CARGO_BIN_EXE_plastia");
+    let run = |args: &[&str]| {
+        Command::new(bin)
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let init = run(&["init"]);
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let event_file = tmp.path().join("event.json");
+    fs::write(
+        &event_file,
+        r#"{"id":"decision-failpoint","scope":"project/a","text":"Decision: gate = review"}"#,
+    )
+    .unwrap();
+    let ingest = run(&["ingest", event_file.to_str().unwrap()]);
+    assert!(
+        ingest.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ingest.stderr)
+    );
+
+    let interrupted = Command::new(bin)
+        .arg("--home")
+        .arg(&home)
+        .arg("consolidate")
+        .env("PLASTIA_FAILPOINT", "after-outbox")
+        .output()
+        .unwrap();
+    assert_eq!(interrupted.status.code(), Some(86));
+    assert!(home.join("write.lock").exists());
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    let pending: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM outbox WHERE status='pending'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let memories: i64 = conn
+        .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!((pending, memories), (1, 0));
+    drop(conn);
+
+    let recovered = run(&["consolidate"]);
+    assert!(
+        recovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    let repeated = run(&["consolidate"]);
+    assert!(
+        repeated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    let counts: (i64, i64, i64) = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM outbox WHERE status='applied'), (SELECT COUNT(*) FROM memories), (SELECT COUNT(*) FROM events WHERE processed=1)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(counts, (1, 1, 1));
+    assert_eq!(fs::read_dir(home.join("memories")).unwrap().count(), 1);
+}

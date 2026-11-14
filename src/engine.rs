@@ -44,6 +44,12 @@ fn outbox_id(event_id: &str, scope: &str, candidate: &Candidate) -> String {
     ))
 }
 
+fn failpoint(name: &str) {
+    if std::env::var("PLASTIA_FAILPOINT").ok().as_deref() == Some(name) {
+        std::process::exit(86);
+    }
+}
+
 pub fn ingest_file(conn: &mut Connection, file: &Path) -> Result<usize> {
     let contents = fs::read_to_string(file)?;
     let val: serde_json::Value = serde_json::from_str(&contents)?;
@@ -266,10 +272,15 @@ pub fn consolidate(conn: &mut Connection, home: &Path, dry_run: bool) -> Result<
                         let path = home.join("memories").join(format!("{id}.md"));
                         let md = encode_markdown(&id, &scope, &c, &event_id, &timestamp);
                         let intent_id = outbox_id(&event_id, &scope, &c);
-                        conn.execute(
-                            "INSERT OR IGNORE INTO outbox(id,event_id,scope,kind,memory_key,memory_id,text,markdown,file_path,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-                            params![intent_id, event_id, scope, c.kind, c.key, id, c.text, md, path.to_string_lossy().to_string(), timestamp],
-                        )?;
+                        {
+                            let tx = conn.transaction()?;
+                            tx.execute(
+                                "INSERT OR IGNORE INTO outbox(id,event_id,scope,kind,memory_key,memory_id,text,markdown,file_path,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                                params![intent_id, event_id, scope, c.kind, c.key, id, c.text, md, path.to_string_lossy().to_string(), timestamp],
+                            )?;
+                            tx.commit()?;
+                        }
+                        failpoint("after-outbox");
                         atomic_write(&path, &md)?;
                         conn.execute("INSERT OR IGNORE INTO memories(id,scope,kind,memory_key,text,source_event,file_path,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
                             params![id, scope, c.kind, c.key, c.text, event_id, path.to_string_lossy().to_string(), timestamp])?;

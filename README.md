@@ -104,7 +104,7 @@ See [DESIGN.md](DESIGN.md) for the intended cognitive lifecycle.
 
 ## Tests
 
-The end-to-end smoke tests check capture, search, dry-run semantics, durable memory creation, outbox replay, conflicting-file protection, conflict registration and reindex. CI checks Rust formatting, clippy and tests. Directory `fsync` and multi-process locking remain future work.
+The end-to-end smoke tests check capture, search, dry-run semantics, durable memory creation, outbox replay, conflicting-file protection, conflict registration, reindex and real-process recovery after the `after-outbox` failpoint. CI checks Rust formatting, clippy and tests. Directory `fsync` and power-loss durability remain future work.
 
 ## License
 

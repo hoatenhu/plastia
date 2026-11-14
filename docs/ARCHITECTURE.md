@@ -44,7 +44,7 @@ Core Rust API first. CLI for ingest, search, inspect, dry-run/replay, consolidat
 Version migrations; never rewrite user Markdown without backup or idempotent recovery. Provenance should survive export/import. No silent loss of history during reindex. Keep documented limitations in README until resolved.
 
 ## Known v0.1 technical debt
-- `consolidate` has a persisted outbox and replay path; CLI writers use a PID-bearing lock, but kill-process fault-injection and directory-sync coverage remain.
+- `consolidate` has a persisted outbox and replay path; CLI writers use a PID-bearing lock, and tests cover process exit after outbox commit. Directory-sync and power-loss coverage remain.
 - `reindex` clears/rebuilds SQL memories but does not preserve durable validity state/versioning, and events are not encoded into Markdown.
 - `source` is unauthenticated text. Existing extracted policies are *unverified claims*, not authorized directives.
 - Bare-key extraction and FTS OR-token semantics are limited; no domain-aware NLP, bilingual recall tests, or stable ranking across episode/knowledge sources.
