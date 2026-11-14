@@ -81,7 +81,7 @@ This is a deliberate safety-first design, **not** natural language memory extrac
     <id>.md             # durable memory; JSON metadata in HTML comment
 ```
 
-Use `plastia reindex` to rebuild the *durable memory* SQL index from Markdown (events remain in SQLite). Do not edit `memory.sqlite3` manually. Writing Markdown and indexing it are currently two separate operations; if interrupted between them, `reindex` repairs the index. For dependable multi-process writers and consistency, a single writer service plus file locking is planned.
+Use `plastia reindex` to rebuild the *durable memory* SQL index from Markdown (events remain in SQLite). Do not edit `memory.sqlite3` manually. Consolidation records Markdown memory writes in a SQLite outbox and replays pending intents before mutating commands. If a target file already exists with different content, recovery fails without overwriting it. Multi-process writers still need a single writer service plus file locking. Directory `fsync` power-loss guarantees are not yet claimed.
 
 ## Roadmap
 
@@ -89,7 +89,8 @@ Use `plastia reindex` to rebuild the *durable memory* SQL index from Markdown (e
 - [x] Incremental deterministic consolidation, dry run
 - [x] Markdown durable memories, full-text search, reindex
 - [x] Conflict detection and provenance
-- [ ] Robust processing transaction/recovery and multi-writer file locking
+- [x] Idempotent consolidation outbox and replay recovery
+- [ ] Multi-writer file locking and stronger crash durability
 - [ ] Conflict resolution, confidence/authority policies, version history
 - [ ] Hook adapters: Hermes, Claude Code, Codex, OpenCode
 - [ ] MCP server (stdio first)
@@ -102,7 +103,7 @@ See [DESIGN.md](DESIGN.md) for the intended cognitive lifecycle.
 
 ## Tests
 
-The end-to-end smoke test checks capture, search, dry-run semantics, durable memory creation, conflict registration and reindex. CI checks Rust formatting, clippy and tests. **This initial archive has not been compiled in the author's environment**, because the Rust toolchain is unavailable there. Run `cargo test` after download and report compilation issues.
+The end-to-end smoke tests check capture, search, dry-run semantics, durable memory creation, outbox replay, conflicting-file protection, conflict registration and reindex. CI checks Rust formatting, clippy and tests. Directory `fsync` and multi-process locking remain future work.
 
 ## License
 

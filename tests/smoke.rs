@@ -285,3 +285,62 @@ fn recovery_replays_pending_intent_idempotently() {
         .unwrap();
     assert_eq!((outbox, memories), (1, 1));
 }
+
+#[test]
+fn recovery_rejects_conflicting_existing_memory_file() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("store");
+    let bin = env!("CARGO_BIN_EXE_plastia");
+    let run = |args: &[&str]| {
+        let out = Command::new(bin)
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8(out.stderr).unwrap(),
+        )
+    };
+    assert!(run(&["init"]).0);
+    let event_file = tmp.path().join("event.json");
+    fs::write(
+        &event_file,
+        r#"{"id":"decision-1","scope":"project/a","text":"Decision: gate = review"}"#,
+    )
+    .unwrap();
+    assert!(run(&["ingest", event_file.to_str().unwrap()]).0);
+
+    let path = home.join("memories/conflicting.md");
+    let expected = "expected content";
+    fs::write(&path, "unrelated content").unwrap();
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    conn.execute(
+        "INSERT INTO outbox(id,event_id,scope,kind,memory_key,memory_id,text,markdown,file_path,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        rusqlite::params!["intent-conflict", "decision-1", "project/a", "decision", "gate", "memory-conflict", expected, expected, path.to_string_lossy().to_string(), "now"],
+    ).unwrap();
+    drop(conn);
+
+    let (success, _, stderr) = run(&["consolidate"]);
+    assert!(!success);
+    assert!(stderr.contains("outbox target differs"));
+    assert_eq!(fs::read_to_string(&path).unwrap(), "unrelated content");
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM outbox WHERE id='intent-conflict'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let processed: i64 = conn
+        .query_row(
+            "SELECT processed FROM events WHERE id='decision-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!((status, processed), ("pending".into(), 0));
+}

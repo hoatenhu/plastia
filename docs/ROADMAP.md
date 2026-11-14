@@ -10,7 +10,8 @@
 **Exit:** CI green; README commands run; no claim of performance unmeasured.
 
 ## M1 — Durability and data integrity
-- [ ] Move cross-resource writes to durable, idempotent journal/outbox; atomic memory file replacement with recovery strategy.
+- [x] Move cross-resource writes to a durable, idempotent outbox; atomic memory file replacement with recovery strategy.
+- [ ] Add kill-process fault injection and directory-sync durability evidence.
 - [ ] Add single-writer coordination, transaction boundaries, recovery/retry and schema migrations; repair/rebuild without losing status/history.
 - [ ] Explicit schema for provenance, claim status, valid-time and supersedes/version; distinguish duplicate vs independent evidence.
 - [ ] Safe conflict resolution command requiring verified authority for policy, plus inspect/audit history.
