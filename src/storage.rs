@@ -52,14 +52,32 @@ pub fn open(home: &Path) -> Result<Connection> {
            INSERT INTO memories_fts(memories_fts,rowid,text) VALUES('delete',old.rowid,old.text);
            INSERT INTO memories_fts(rowid,text) VALUES(new.rowid,new.text);
          END;
-         CREATE TABLE IF NOT EXISTS conflicts (
-           id TEXT PRIMARY KEY,
-           scope TEXT NOT NULL,
-           memory_key TEXT NOT NULL,
-           existing_memory TEXT NOT NULL,
-           incoming_event TEXT NOT NULL,
-           status TEXT NOT NULL DEFAULT 'pending'
-         );",
+          CREATE TABLE IF NOT EXISTS conflicts (
+            id TEXT PRIMARY KEY,
+            scope TEXT NOT NULL,
+            memory_key TEXT NOT NULL,
+            existing_memory TEXT NOT NULL,
+            incoming_event TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+          );
+          CREATE TABLE IF NOT EXISTS outbox (
+            id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            memory_key TEXT NOT NULL,
+            memory_id TEXT NOT NULL,
+            text TEXT NOT NULL,
+            markdown TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            FOREIGN KEY(event_id) REFERENCES events(id)
+          );
+          CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(status);
+          CREATE INDEX IF NOT EXISTS outbox_event ON outbox(event_id);
+          CREATE INDEX IF NOT EXISTS outbox_memory ON outbox(memory_id)
+          ;",
     )?;
     Ok(conn)
 }

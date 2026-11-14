@@ -37,6 +37,13 @@ fn digest(s: &str) -> String {
     blake3::hash(s.as_bytes()).to_hex()[..20].to_string()
 }
 
+fn outbox_id(event_id: &str, scope: &str, candidate: &Candidate) -> String {
+    digest(&format!(
+        "outbox\0{}\0{}\0{}\0{}\0{}",
+        event_id, scope, candidate.kind, candidate.key, candidate.text
+    ))
+}
+
 pub fn ingest_file(conn: &mut Connection, file: &Path) -> Result<usize> {
     let contents = fs::read_to_string(file)?;
     let val: serde_json::Value = serde_json::from_str(&contents)?;

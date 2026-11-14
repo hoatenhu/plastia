@@ -1,3 +1,4 @@
+use rusqlite::Connection;
 use std::fs;
 use std::process::Command;
 use tempfile::tempdir;
@@ -118,4 +119,44 @@ fn dry_run_preserves_work_and_scope_isolation() {
     assert!(!run(&["search", "review", "--scope", "project/b"]).contains("review"));
     assert!(run(&["search", "deploy", "--scope", "project/b"]).contains("deploy"));
     assert!(run(&["consolidate"]).contains("\"events_reviewed\": 0"));
+}
+
+#[test]
+fn opens_existing_store_with_outbox_schema() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("store");
+    let bin = env!("CARGO_BIN_EXE_plastia");
+    let init = Command::new(bin)
+        .arg("--home")
+        .arg(&home)
+        .arg("init")
+        .output()
+        .unwrap();
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    conn.execute("DROP TABLE outbox", []).unwrap();
+    drop(conn);
+
+    let reopened = Command::new(bin)
+        .arg("--home")
+        .arg(&home)
+        .arg("stats")
+        .output()
+        .unwrap();
+    assert!(
+        reopened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reopened.stderr)
+    );
+
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM outbox", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
 }
