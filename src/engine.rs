@@ -3,6 +3,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
+    collections::HashMap,
     fs,
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
@@ -396,11 +397,38 @@ pub fn reindex(conn: &mut Connection, home: &Path) -> Result<usize> {
             field("created_at")?,
         ));
     }
+    let mut lifecycle = HashMap::new();
+    {
+        let mut query = conn.prepare(
+            "SELECT id,status,supersedes,valid_from,valid_until,evidence_type FROM memories",
+        )?;
+        let rows = query.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, status, supersedes, valid_from, valid_until, evidence_type) = row?;
+            lifecycle.insert(
+                id,
+                (status, supersedes, valid_from, valid_until, evidence_type),
+            );
+        }
+    }
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM memories", [])?;
     for (id, scope, kind, key, text, source, path, created) in &docs {
-        tx.execute("INSERT INTO memories(id,scope,kind,memory_key,text,source_event,file_path,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![id,scope,kind,key,text,source,path,created])?;
+        let (status, supersedes, valid_from, valid_until, evidence_type) = lifecycle
+            .get(id)
+            .cloned()
+            .unwrap_or(("active".into(), None, None, None, "observed".into()));
+        tx.execute("INSERT INTO memories(id,scope,kind,memory_key,text,source_event,status,supersedes,valid_from,valid_until,evidence_type,file_path,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            params![id,scope,kind,key,text,source,status,supersedes,valid_from,valid_until,evidence_type,path,created])?;
     }
     tx.commit()?;
     Ok(docs.len())

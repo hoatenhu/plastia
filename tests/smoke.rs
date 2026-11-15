@@ -577,3 +577,78 @@ fn memory_lifecycle_schema_migrates_existing_store() {
         .unwrap();
     assert_eq!(audit, 0);
 }
+
+#[test]
+fn consolidated_memory_preserves_lifecycle_and_provenance_on_reindex() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("store");
+    let bin = env!("CARGO_BIN_EXE_plastia");
+    let run = |args: &[&str]| {
+        let out = Command::new(bin)
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    run(&["init"]);
+    let event_file = tmp.path().join("event.json");
+    fs::write(
+        &event_file,
+        r#"{"id":"provenance-event","scope":"project/a","source":"untrusted/document","occurred_at":"2026-11-15T00:00:00Z","text":"Decision: gate = review"}"#,
+    )
+    .unwrap();
+    run(&["ingest", event_file.to_str().unwrap()]);
+    run(&["consolidate"]);
+
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    let before: (String, String, String, String, String) = conn
+        .query_row(
+            "SELECT status, source_event, evidence_type, created_at, file_path FROM memories",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(before.0, "active");
+    assert_eq!(before.1, "provenance-event");
+    assert_eq!(before.2, "observed");
+    drop(conn);
+
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    conn.execute(
+        "UPDATE memories SET status='superseded', supersedes='older-memory', valid_from='2026-11-15', valid_until='2026-11-16'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    run(&["reindex"]);
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    let after: (String, Option<String>, Option<String>, Option<String>, String, String, String) = conn
+        .query_row(
+            "SELECT status, supersedes, valid_from, valid_until, source_event, evidence_type, created_at FROM memories",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+        )
+        .unwrap();
+    assert_eq!(after.0, "superseded");
+    assert_eq!(after.1, Some("older-memory".into()));
+    assert_eq!(after.2, Some("2026-11-15".into()));
+    assert_eq!(after.3, Some("2026-11-16".into()));
+    assert_eq!(after.4, before.1);
+    assert_eq!(after.5, before.2);
+    assert_eq!(after.6, before.3);
+}
