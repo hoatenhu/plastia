@@ -47,6 +47,18 @@ enum Command {
     Reindex,
     /// Show store counts
     Stats,
+    /// List pending conflicts
+    Conflicts,
+    /// Resolve a conflict explicitly
+    ResolveConflict {
+        id: String,
+        #[arg(long, conflicts_with = "reject")]
+        accept: bool,
+        #[arg(long, conflicts_with = "accept")]
+        reject: bool,
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 fn main() {
@@ -60,7 +72,11 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     let _writer_lock = if matches!(
         &cli.command,
-        Command::Init | Command::Ingest { .. } | Command::Consolidate { .. } | Command::Reindex
+        Command::Init
+            | Command::Ingest { .. }
+            | Command::Consolidate { .. }
+            | Command::Reindex
+            | Command::ResolveConflict { .. }
     ) {
         Some(storage::WriterLock::acquire(&cli.home)?)
     } else {
@@ -76,7 +92,10 @@ fn run() -> Result<()> {
         return Err("store not initialized; run `plastia init`".into());
     }
     let mut conn = storage::open(&cli.home)?;
-    if !matches!(&cli.command, Command::Search { .. } | Command::Stats) {
+    if !matches!(
+        &cli.command,
+        Command::Search { .. } | Command::Stats | Command::Conflicts
+    ) {
         engine::recover(&mut conn, &cli.home)?;
     }
     match cli.command {
@@ -108,6 +127,26 @@ fn run() -> Result<()> {
         }
         Command::Stats => {
             println!("{}", serde_json::to_string_pretty(&engine::stats(&conn)?)?);
+        }
+        Command::Conflicts => {
+            for conflict in engine::list_conflicts(&conn)? {
+                println!("{} {} {}", conflict.id, conflict.scope, conflict.memory_key);
+            }
+        }
+        Command::ResolveConflict {
+            id,
+            accept,
+            reject,
+            reason,
+        } => {
+            if accept == reject || reason.trim().is_empty() {
+                return Err(
+                    "choose exactly one of --accept/--reject and provide a non-empty --reason"
+                        .into(),
+                );
+            }
+            engine::resolve_conflict(&mut conn, &cli.home, &id, accept, reason.trim())?;
+            println!("Resolved {id}");
         }
     }
     Ok(())

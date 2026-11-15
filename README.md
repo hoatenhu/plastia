@@ -91,6 +91,7 @@ Use `plastia reindex` to rebuild the *durable memory* SQL index from Markdown (e
 - [x] Conflict detection and provenance
 - [x] Idempotent consolidation outbox and replay recovery
 - [x] Single-writer lock for mutating commands
+- [x] Versioned memory lifecycle and explicit conflict resolution
 - [ ] Stronger crash durability and directory `fsync`
 - [ ] Conflict resolution, confidence/authority policies, version history
 - [ ] Hook adapters: Hermes, Claude Code, Codex, OpenCode
@@ -104,7 +105,9 @@ See [DESIGN.md](DESIGN.md) for the intended cognitive lifecycle.
 
 ## Tests
 
-The end-to-end smoke tests check capture, search, dry-run semantics, durable memory creation, outbox replay, conflicting-file protection, conflict registration, reindex and real-process recovery after the `after-outbox` failpoint. CI checks Rust formatting, clippy and tests. Directory `fsync` and power-loss durability remain future work.
+The end-to-end smoke tests check capture, search, dry-run semantics, durable memory creation, outbox replay, conflicting-file protection, conflict registration, lifecycle-preserving reindex, explicit accept/reject resolution and real-process recovery after the `after-outbox` failpoint. CI checks Rust formatting, clippy and tests. Directory `fsync` and power-loss durability remain future work.
+
+Conflicts remain pending until explicitly resolved. List them with `plastia conflicts`, then use `plastia resolve-conflict <id> --accept --reason "..."` or `--reject`. This local v0.x command is explicit confirmation, not authenticated multi-user authorization; the free-form event `source` field never grants authority.
 
 ## License
 

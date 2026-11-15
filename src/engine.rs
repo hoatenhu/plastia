@@ -315,6 +315,92 @@ pub struct Hit {
     pub text: String,
 }
 
+#[derive(Debug)]
+pub struct Conflict {
+    pub id: String,
+    pub scope: String,
+    pub memory_key: String,
+}
+
+pub fn list_conflicts(conn: &Connection) -> Result<Vec<Conflict>> {
+    let mut query = conn.prepare(
+        "SELECT id,scope,memory_key FROM conflicts WHERE resolution='pending' ORDER BY rowid",
+    )?;
+    let rows = query.query_map([], |row| {
+        Ok(Conflict {
+            id: row.get(0)?,
+            scope: row.get(1)?,
+            memory_key: row.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub fn resolve_conflict(
+    conn: &mut Connection,
+    home: &Path,
+    conflict_id: &str,
+    accept: bool,
+    reason: &str,
+) -> Result<()> {
+    if conflict_id.trim().is_empty() || reason.trim().is_empty() {
+        return Err("conflict ID and reason must not be empty".into());
+    }
+    let conflict: (String, String, String, String, String, String) = conn.query_row(
+        "SELECT c.scope,c.memory_key,c.existing_memory,c.incoming_event,c.resolution,m.kind FROM conflicts c JOIN memories m ON m.id=c.existing_memory WHERE c.id=?1",
+        [conflict_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+    )?;
+    if conflict.4 != "pending" {
+        return Ok(());
+    }
+    let incoming: (String, String, String) = conn.query_row(
+        "SELECT id,text,occurred_at FROM events WHERE id=?1",
+        [&conflict.3],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let tx = conn.transaction()?;
+    if accept {
+        let memory_id = digest(&format!(
+            "resolved\0{}\0{}\0{}",
+            conflict_id, incoming.0, incoming.1
+        ));
+        let candidate = Candidate {
+            kind: conflict.5.clone(),
+            key: conflict.1.clone(),
+            text: incoming.1.clone(),
+        };
+        let markdown = encode_markdown(
+            &memory_id,
+            &conflict.0,
+            &candidate,
+            &incoming.0,
+            &incoming.2,
+        );
+        let path = home.join("memories").join(format!("{memory_id}.md"));
+        atomic_write(&path, &markdown)?;
+        tx.execute(
+            "UPDATE memories SET status='superseded', valid_until=?1 WHERE id=?2 AND status='active'",
+            params![incoming.2, conflict.2],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO memories(id,scope,kind,memory_key,text,source_event,status,supersedes,valid_from,evidence_type,file_path,created_at) VALUES (?1,?2,?3,?4,?5,?6,'active',?7,?8,'observed',?9,?8)",
+            params![memory_id, conflict.0, conflict.5, conflict.1, incoming.1, incoming.0, conflict.2, incoming.2, path.to_string_lossy().to_string()],
+        )?;
+    }
+    let resolution = if accept { "accepted" } else { "rejected" };
+    tx.execute(
+        "UPDATE conflicts SET resolution=?1,resolved_at=?2,resolution_reason=?3 WHERE id=?4 AND resolution='pending'",
+        params![resolution, now(), reason, conflict_id],
+    )?;
+    tx.execute(
+        "INSERT INTO audit_log(action,conflict_id,memory_id,details,created_at) VALUES (?1,?2,NULL,?3,?4)",
+        params![resolution, conflict_id, reason, now()],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn search(conn: &Connection, query: &str, scope: Option<&str>, limit: u32) -> Result<Vec<Hit>> {
     let tokens: Vec<String> = query
         .split(|c: char| !c.is_alphanumeric())

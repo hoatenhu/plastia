@@ -652,3 +652,151 @@ fn consolidated_memory_preserves_lifecycle_and_provenance_on_reindex() {
     assert_eq!(after.5, before.2);
     assert_eq!(after.6, before.3);
 }
+
+#[test]
+fn conflict_accept_creates_active_version_and_is_idempotent() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("store");
+    let bin = env!("CARGO_BIN_EXE_plastia");
+    let run = |args: &[&str]| {
+        let out = Command::new(bin)
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    run(&["init"]);
+    let events = tmp.path().join("events.json");
+    fs::write(
+        &events,
+        r#"{"events":[
+          {"id":"old","scope":"project/a","text":"Decision: gate = review"},
+          {"id":"new","scope":"project/a","text":"Decision: gate = deploy"}
+        ]}"#,
+    )
+    .unwrap();
+    run(&["ingest", events.to_str().unwrap()]);
+    run(&["consolidate"]);
+    let conflicts = run(&["conflicts"]);
+    let conflict_id = conflicts
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    run(&[
+        "resolve-conflict",
+        &conflict_id,
+        "--accept",
+        "--reason",
+        "approved correction",
+    ]);
+    run(&[
+        "resolve-conflict",
+        &conflict_id,
+        "--accept",
+        "--reason",
+        "repeat",
+    ]);
+
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    let active: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE status='active'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let superseded: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE status='superseded'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let accepted: String = conn
+        .query_row(
+            "SELECT resolution FROM conflicts WHERE id=?1",
+            [&conflict_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let audits: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM audit_log WHERE conflict_id=?1",
+            [&conflict_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        (active, superseded, accepted, audits),
+        (1, 1, "accepted".into(), 1)
+    );
+}
+
+#[test]
+fn conflict_reject_preserves_existing_active_memory() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("store");
+    let bin = env!("CARGO_BIN_EXE_plastia");
+    let run = |args: &[&str]| {
+        let out = Command::new(bin)
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    run(&["init"]);
+    let events = tmp.path().join("events.json");
+    fs::write(&events, r#"{"events":[{"id":"old","scope":"project/a","text":"Decision: gate = review"},{"id":"new","scope":"project/a","text":"Decision: gate = deploy"}]}"#).unwrap();
+    run(&["ingest", events.to_str().unwrap()]);
+    run(&["consolidate"]);
+    let conflict_id = run(&["conflicts"])
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    run(&[
+        "resolve-conflict",
+        &conflict_id,
+        "--reject",
+        "--reason",
+        "untrusted source",
+    ]);
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    let active_text: String = conn
+        .query_row(
+            "SELECT text FROM memories WHERE status='active'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(active_text, "review");
+    let active_deploy: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE status='active' AND text='deploy'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(active_deploy, 0);
+}

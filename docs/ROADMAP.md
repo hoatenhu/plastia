@@ -14,8 +14,8 @@
 - [x] Add deterministic process-exit fault injection after outbox commit.
 - [ ] Add directory-sync and power-loss durability evidence.
 - [x] Add single-writer coordination, transaction boundaries, recovery/retry and schema migrations; repair/rebuild without losing status/history.
-- [ ] Explicit schema for provenance, claim status, valid-time and supersedes/version; distinguish duplicate vs independent evidence.
-- [ ] Safe conflict resolution command requiring verified authority for policy, plus inspect/audit history.
+- [x] Explicit schema for provenance, claim status, valid-time and supersedes/version; distinguish duplicate vs independent evidence.
+- [x] Safe explicit conflict resolution command plus inspect/audit history. Authenticated authority remains required before remote or automated use.
 **Exit:** Kill-process/fault-injection/replay tests demonstrate no permanently lost or silently corrupted acknowledged events; conflicts never auto-override policy.
 
 ## M2 — Programmatic API + MCP stdio + automatic capture adapter
