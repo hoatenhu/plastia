@@ -102,7 +102,7 @@ fn process_exists(pid: u32) -> bool {
 pub fn open(home: &Path) -> Result<Connection> {
     std::fs::create_dir_all(home.join("memories"))
         .map_err(|_| rusqlite::Error::InvalidPath(home.to_path_buf()))?;
-    let conn = Connection::open(home.join("memory.sqlite3"))?;
+    let mut conn = Connection::open(home.join("memory.sqlite3"))?;
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
          PRAGMA busy_timeout=5000;
@@ -174,26 +174,65 @@ pub fn open(home: &Path) -> Result<Connection> {
           );
           CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(status);
           CREATE INDEX IF NOT EXISTS outbox_event ON outbox(event_id);
-          CREATE INDEX IF NOT EXISTS outbox_memory ON outbox(memory_id)
-          ;",
+           CREATE INDEX IF NOT EXISTS outbox_memory ON outbox(memory_id)
+           ;
+           CREATE TABLE IF NOT EXISTS conflict_outbox (
+             id TEXT PRIMARY KEY,
+             conflict_id TEXT NOT NULL UNIQUE,
+             scope TEXT NOT NULL,
+             kind TEXT NOT NULL,
+             memory_key TEXT NOT NULL,
+             memory_id TEXT NOT NULL,
+             supersedes TEXT NOT NULL,
+             text TEXT NOT NULL,
+             source_event TEXT NOT NULL,
+             markdown TEXT NOT NULL,
+             file_path TEXT NOT NULL,
+             created_at TEXT NOT NULL,
+             status TEXT NOT NULL DEFAULT 'pending'
+           );
+           CREATE INDEX IF NOT EXISTS conflict_outbox_pending ON conflict_outbox(status);
+           CREATE TABLE IF NOT EXISTS schema_migrations (
+             version INTEGER PRIMARY KEY,
+             applied_at TEXT NOT NULL
+           );",
     )?;
-    for statement in [
-        "ALTER TABLE memories ADD COLUMN supersedes TEXT",
-        "ALTER TABLE memories ADD COLUMN valid_from TEXT",
-        "ALTER TABLE memories ADD COLUMN valid_until TEXT",
-        "ALTER TABLE memories ADD COLUMN evidence_type TEXT NOT NULL DEFAULT 'observed'",
-        "ALTER TABLE conflicts ADD COLUMN resolution TEXT NOT NULL DEFAULT 'pending'",
-        "ALTER TABLE conflicts ADD COLUMN resolved_at TEXT",
-        "ALTER TABLE conflicts ADD COLUMN resolution_reason TEXT",
-    ] {
-        if let Err(error) = conn.execute(statement, []) {
-            if !error.to_string().contains("duplicate column name") {
-                return Err(error);
+    let version: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if version < 1 {
+        let tx = conn.transaction()?;
+        let has_column = |table: &str, column: &str| -> rusqlite::Result<bool> {
+            let mut query = tx.prepare(&format!("PRAGMA table_info({table})"))?;
+            let columns: Vec<String> = query
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(columns.iter().any(|name| name == column))
+        };
+        for (table, column, definition) in [
+            ("memories", "supersedes", "TEXT"),
+            ("memories", "valid_from", "TEXT"),
+            ("memories", "valid_until", "TEXT"),
+            (
+                "memories",
+                "evidence_type",
+                "TEXT NOT NULL DEFAULT 'observed'",
+            ),
+            ("conflicts", "resolution", "TEXT NOT NULL DEFAULT 'pending'"),
+            ("conflicts", "resolved_at", "TEXT"),
+            ("conflicts", "resolution_reason", "TEXT"),
+        ] {
+            if !has_column(table, column)? {
+                tx.execute(
+                    &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+                    [],
+                )?;
             }
         }
-    }
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS audit_log (
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS audit_log (
            id INTEGER PRIMARY KEY AUTOINCREMENT,
            action TEXT NOT NULL,
            conflict_id TEXT,
@@ -201,7 +240,13 @@ pub fn open(home: &Path) -> Result<Connection> {
            details TEXT NOT NULL,
            created_at TEXT NOT NULL
          );
-         CREATE INDEX IF NOT EXISTS audit_log_conflict ON audit_log(conflict_id);",
-    )?;
+          CREATE INDEX IF NOT EXISTS audit_log_conflict ON audit_log(conflict_id);",
+        )?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (1, strftime('%s','now'))",
+            [],
+        )?;
+        tx.commit()?;
+    }
     Ok(conn)
 }

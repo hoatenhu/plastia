@@ -109,6 +109,8 @@ The end-to-end smoke tests check capture, search, dry-run semantics, durable mem
 
 Conflicts remain pending until explicitly resolved. List them with `plastia conflicts`, then use `plastia resolve-conflict <id> --accept --reason "..."` or `--reject`. This local v0.x command is explicit confirmation, not authenticated multi-user authorization; the free-form event `source` field never grants authority.
 
+Policy conflicts cannot be accepted by the local CLI until authenticated authority and scoped permissions exist. Accepted non-policy resolutions use a durable outbox, so a process interruption between Markdown materialization and SQLite commit is recoverable.
+
 ## License
 
 MIT OR Apache-2.0 (dual licensed). See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).

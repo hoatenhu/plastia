@@ -216,7 +216,73 @@ pub fn recover(conn: &mut Connection, home: &Path) -> Result<usize> {
         tx.commit()?;
         applied += 1;
     }
+    applied += recover_conflict_outbox(conn, home)?;
     Ok(applied)
+}
+
+fn recover_conflict_outbox(conn: &mut Connection, home: &Path) -> Result<usize> {
+    let mut intents = Vec::new();
+    {
+        let mut query = conn.prepare("SELECT id,scope,kind,memory_key,memory_id,supersedes,text,source_event,markdown,file_path,created_at FROM conflict_outbox WHERE status='pending' ORDER BY rowid")?;
+        let rows = query.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
+            ))
+        })?;
+        for row in rows {
+            intents.push(row?);
+        }
+    }
+    for (
+        intent_id,
+        scope,
+        kind,
+        key,
+        memory_id,
+        supersedes,
+        text,
+        event_id,
+        markdown,
+        file_path,
+        created_at,
+    ) in &intents
+    {
+        let path = Path::new(file_path);
+        if path.exists() {
+            if fs::read_to_string(path)? != *markdown {
+                return Err(format!("conflict outbox target differs: {}", path.display()).into());
+            }
+        } else {
+            if path.parent() != Some(home.join("memories").as_path()) {
+                return Err(format!(
+                    "conflict outbox target outside memory directory: {}",
+                    path.display()
+                )
+                .into());
+            }
+            atomic_write(path, markdown)?;
+        }
+        failpoint("after-conflict-file");
+        let tx = conn.transaction()?;
+        tx.execute("UPDATE memories SET status='superseded', valid_until=?1 WHERE id=?2 AND status='active'", params![created_at, supersedes])?;
+        tx.execute("INSERT OR IGNORE INTO memories(id,scope,kind,memory_key,text,source_event,status,supersedes,valid_from,evidence_type,file_path,created_at) VALUES (?1,?2,?3,?4,?5,?6,'active',?7,?8,'observed',?9,?8)", params![memory_id, scope, kind, key, text, event_id, supersedes, created_at, file_path])?;
+        tx.execute(
+            "UPDATE conflict_outbox SET status='applied' WHERE id=?1",
+            [intent_id],
+        )?;
+        tx.commit()?;
+    }
+    Ok(intents.len())
 }
 
 pub fn consolidate(conn: &mut Connection, home: &Path, dry_run: bool) -> Result<Summary> {
@@ -354,6 +420,9 @@ pub fn resolve_conflict(
     if conflict.4 != "pending" {
         return Ok(());
     }
+    if accept && conflict.5 == "policy" {
+        return Err("policy conflicts require authenticated authority".into());
+    }
     let incoming: (String, String, String) = conn.query_row(
         "SELECT id,text,occurred_at FROM events WHERE id=?1",
         [&conflict.3],
@@ -378,14 +447,12 @@ pub fn resolve_conflict(
             &incoming.2,
         );
         let path = home.join("memories").join(format!("{memory_id}.md"));
-        atomic_write(&path, &markdown)?;
+        if path.exists() && fs::read_to_string(&path)? != markdown {
+            return Err(format!("conflict target differs: {}", path.display()).into());
+        }
         tx.execute(
-            "UPDATE memories SET status='superseded', valid_until=?1 WHERE id=?2 AND status='active'",
-            params![incoming.2, conflict.2],
-        )?;
-        tx.execute(
-            "INSERT OR IGNORE INTO memories(id,scope,kind,memory_key,text,source_event,status,supersedes,valid_from,evidence_type,file_path,created_at) VALUES (?1,?2,?3,?4,?5,?6,'active',?7,?8,'observed',?9,?8)",
-            params![memory_id, conflict.0, conflict.5, conflict.1, incoming.1, incoming.0, conflict.2, incoming.2, path.to_string_lossy().to_string()],
+            "INSERT OR IGNORE INTO conflict_outbox(id,conflict_id,scope,kind,memory_key,memory_id,supersedes,text,source_event,markdown,file_path,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![conflict_id, conflict_id, conflict.0, conflict.5, conflict.1, memory_id, conflict.2, incoming.1, incoming.0, markdown, path.to_string_lossy().to_string(), incoming.2],
         )?;
     }
     let resolution = if accept { "accepted" } else { "rejected" };
@@ -393,11 +460,22 @@ pub fn resolve_conflict(
         "UPDATE conflicts SET resolution=?1,resolved_at=?2,resolution_reason=?3 WHERE id=?4 AND resolution='pending'",
         params![resolution, now(), reason, conflict_id],
     )?;
+    let audit_memory_id = if accept {
+        Some(digest(&format!(
+            "resolved\0{}\0{}\0{}",
+            conflict_id, incoming.0, incoming.1
+        )))
+    } else {
+        None
+    };
     tx.execute(
-        "INSERT INTO audit_log(action,conflict_id,memory_id,details,created_at) VALUES (?1,?2,NULL,?3,?4)",
-        params![resolution, conflict_id, reason, now()],
+        "INSERT INTO audit_log(action,conflict_id,memory_id,details,created_at) VALUES (?1,?2,?3,?4,?5)",
+        params![resolution, conflict_id, audit_memory_id, reason, now()],
     )?;
     tx.commit()?;
+    if accept {
+        recover_conflict_outbox(conn, home)?;
+    }
     Ok(())
 }
 
@@ -447,6 +525,16 @@ pub fn search(conn: &Connection, query: &str, scope: Option<&str>, limit: u32) -
 
 // Recovery after file/database divergence. Markdown memory files are canonical for durable memories.
 pub fn reindex(conn: &mut Connection, home: &Path) -> Result<usize> {
+    {
+        let mut query = conn.prepare("SELECT file_path FROM memories")?;
+        let paths = query.query_map([], |row| row.get::<_, String>(0))?;
+        for path in paths {
+            let path = path?;
+            if !Path::new(&path).is_file() {
+                return Err(format!("cannot reindex: memory file is missing: {path}").into());
+            }
+        }
+    }
     let mut docs = Vec::new();
     for entry in fs::read_dir(home.join("memories"))? {
         let entry = entry?;
@@ -525,6 +613,6 @@ pub fn stats(conn: &Connection) -> Result<serde_json::Value> {
         conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
     };
     Ok(
-        json!({"events":count("events")?, "unprocessed_events":count("(SELECT 1 FROM events WHERE processed=0)")?, "memories":count("memories")?, "pending_conflicts":count("(SELECT 1 FROM conflicts WHERE status='pending')")?}),
+        json!({"events":count("events")?, "unprocessed_events":count("(SELECT 1 FROM events WHERE processed=0)")?, "memories":count("memories")?, "pending_conflicts":count("(SELECT 1 FROM conflicts WHERE resolution='pending')")?}),
     )
 }

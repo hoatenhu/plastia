@@ -737,10 +737,26 @@ fn conflict_accept_creates_active_version_and_is_idempotent() {
             |row| row.get(0),
         )
         .unwrap();
+    let audit_memory: Option<String> = conn
+        .query_row(
+            "SELECT memory_id FROM audit_log WHERE conflict_id=?1",
+            [&conflict_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let active_memory: String = conn
+        .query_row("SELECT id FROM memories WHERE status='active'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    drop(conn);
+    let stats: serde_json::Value = serde_json::from_str(&run(&["stats"])).unwrap();
     assert_eq!(
         (active, superseded, accepted, audits),
         (1, 1, "accepted".into(), 1)
     );
+    assert_eq!(audit_memory, Some(active_memory));
+    assert_eq!(stats["pending_conflicts"], 0);
 }
 
 #[test]
@@ -799,4 +815,110 @@ fn conflict_reject_preserves_existing_active_memory() {
         )
         .unwrap();
     assert_eq!(active_deploy, 0);
+    drop(conn);
+    let stats: serde_json::Value = serde_json::from_str(&run(&["stats"])).unwrap();
+    assert_eq!(stats["pending_conflicts"], 0);
+}
+
+#[test]
+fn reindex_refuses_to_delete_memory_when_markdown_is_missing() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("store");
+    let bin = env!("CARGO_BIN_EXE_plastia");
+    let run = |args: &[&str]| {
+        let out = Command::new(bin)
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .output()
+            .unwrap();
+        out
+    };
+    assert!(run(&["init"]).status.success());
+    let event = tmp.path().join("event.json");
+    fs::write(
+        &event,
+        r#"{"id":"missing-file-event","scope":"project/a","text":"Decision: gate = review"}"#,
+    )
+    .unwrap();
+    assert!(run(&["ingest", event.to_str().unwrap()]).status.success());
+    assert!(run(&["consolidate"]).status.success());
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    let path: String = conn
+        .query_row("SELECT file_path FROM memories", [], |row| row.get(0))
+        .unwrap();
+    let memory_id: String = conn
+        .query_row("SELECT id FROM memories", [], |row| row.get(0))
+        .unwrap();
+    drop(conn);
+    fs::remove_file(path).unwrap();
+    let reindex = run(&["reindex"]);
+    assert!(!reindex.status.success());
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    let preserved: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE id=?1",
+            [&memory_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(preserved, 1);
+}
+
+#[test]
+fn policy_conflict_accept_is_rejected_without_authority() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("store");
+    let bin = env!("CARGO_BIN_EXE_plastia");
+    let run = |args: &[&str]| {
+        let out = Command::new(bin)
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    run(&["init"]);
+    let events = tmp.path().join("events.json");
+    fs::write(&events, r#"{"events":[{"id":"policy-old","scope":"project/a","text":"Policy: deploy = review"},{"id":"policy-new","scope":"project/a","text":"Policy: deploy = automatic"}]}"#).unwrap();
+    run(&["ingest", events.to_str().unwrap()]);
+    run(&["consolidate"]);
+    let conflict_id = run(&["conflicts"])
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    let out = Command::new(bin)
+        .arg("--home")
+        .arg(&home)
+        .args([
+            "resolve-conflict",
+            &conflict_id,
+            "--accept",
+            "--reason",
+            "approved",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    let resolution: String = conn
+        .query_row(
+            "SELECT resolution FROM conflicts WHERE id=?1",
+            [&conflict_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let active: i64 = conn.query_row("SELECT COUNT(*) FROM memories WHERE status='active' AND kind='policy' AND text='automatic'", [], |row| row.get(0)).unwrap();
+    assert_eq!(resolution, "pending");
+    assert_eq!(active, 0);
 }
