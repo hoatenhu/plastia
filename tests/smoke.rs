@@ -509,3 +509,71 @@ fn process_exit_after_outbox_commit_recovers() {
     assert_eq!(counts, (1, 1, 1));
     assert_eq!(fs::read_dir(home.join("memories")).unwrap().count(), 1);
 }
+
+#[test]
+fn memory_lifecycle_schema_migrates_existing_store() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("store");
+    let bin = env!("CARGO_BIN_EXE_plastia");
+    let init = Command::new(bin)
+        .arg("--home")
+        .arg(&home)
+        .arg("init")
+        .output()
+        .unwrap();
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    let event_id = "legacy-event";
+    conn.execute(
+        "INSERT INTO events(id,scope,source,occurred_at,text) VALUES (?1,?2,?3,?4,?5)",
+        rusqlite::params![event_id, "project/a", "test", "now", "legacy"],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO memories(id,scope,kind,memory_key,text,source_event,file_path,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        rusqlite::params!["legacy-memory", "project/a", "decision", "gate", "review", event_id, "legacy.md", "now"],
+    )
+    .unwrap();
+    drop(conn);
+
+    let stats = Command::new(bin)
+        .arg("--home")
+        .arg(&home)
+        .arg("stats")
+        .output()
+        .unwrap();
+    assert!(
+        stats.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stats.stderr)
+    );
+
+    let conn = Connection::open(home.join("memory.sqlite3")).unwrap();
+    let columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(memories)")
+        .unwrap()
+        .query_map([], |row| row.get(1))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    assert!(columns.iter().any(|column| column == "supersedes"));
+    assert!(columns.iter().any(|column| column == "valid_from"));
+    assert!(columns.iter().any(|column| column == "evidence_type"));
+    let lifecycle: (String, Option<String>, String) = conn
+        .query_row(
+            "SELECT status, supersedes, evidence_type FROM memories WHERE id='legacy-memory'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(lifecycle, ("active".into(), None, "observed".into()));
+    let audit: i64 = conn
+        .query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(audit, 0);
+}

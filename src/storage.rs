@@ -177,5 +177,31 @@ pub fn open(home: &Path) -> Result<Connection> {
           CREATE INDEX IF NOT EXISTS outbox_memory ON outbox(memory_id)
           ;",
     )?;
+    for statement in [
+        "ALTER TABLE memories ADD COLUMN supersedes TEXT",
+        "ALTER TABLE memories ADD COLUMN valid_from TEXT",
+        "ALTER TABLE memories ADD COLUMN valid_until TEXT",
+        "ALTER TABLE memories ADD COLUMN evidence_type TEXT NOT NULL DEFAULT 'observed'",
+        "ALTER TABLE conflicts ADD COLUMN resolution TEXT NOT NULL DEFAULT 'pending'",
+        "ALTER TABLE conflicts ADD COLUMN resolved_at TEXT",
+        "ALTER TABLE conflicts ADD COLUMN resolution_reason TEXT",
+    ] {
+        if let Err(error) = conn.execute(statement, []) {
+            if !error.to_string().contains("duplicate column name") {
+                return Err(error);
+            }
+        }
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS audit_log (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           action TEXT NOT NULL,
+           conflict_id TEXT,
+           memory_id TEXT,
+           details TEXT NOT NULL,
+           created_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS audit_log_conflict ON audit_log(conflict_id);",
+    )?;
     Ok(conn)
 }
